@@ -1,4 +1,4 @@
-ENV['VAGRANT_NO_PARALLEL'] = 'yes'   # ← forces master first, then worker
+# ENV['VAGRANT_NO_PARALLEL'] = 'yes'   # ← forces master first, then worker
 
 MASTER_IP = "192.168.56.10"
 WORKER_IP = "192.168.56.11"
@@ -37,7 +37,7 @@ COMMON_SCRIPT = <<~SHELL
   echo "=== Installing kubelet kubeadm kubectl ==="
   mkdir -p /etc/apt/keyrings
   curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | \
-    gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    gpg --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
   echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' \
     > /etc/apt/sources.list.d/kubernetes.list
   apt-get update -y
@@ -77,11 +77,13 @@ NETPLAN
     --apiserver-advertise-address=192.168.56.10
 
   echo "=== Setting up kubeconfig ==="
-  export KUBECONFIG=/etc/kubernetes/admin.conf
   mkdir -p /home/vagrant/.kube
   cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config
   chown vagrant:vagrant /home/vagrant/.kube/config
   echo 'export KUBECONFIG=$HOME/.kube/config' >> /home/vagrant/.bashrc
+
+  # Set KUBECONFIG for current shell session
+  export KUBECONFIG=/etc/kubernetes/admin.conf
 
   echo "=== Mounting BPF filesystem ==="
   mount | grep -q /sys/fs/bpf || mount -t bpf bpffs /sys/fs/bpf
@@ -98,10 +100,28 @@ NETPLAN
   echo "=== Waiting for master node to be Ready ==="
   kubectl wait --for=condition=Ready node/k8s-master --timeout=180s
 
+  echo "=== Saving worker join command ==="
+  kubeadm token create --print-join-command > /vagrant/join-command.sh
+  chmod +x /vagrant/join-command.sh
+
+  echo "=== Control plane setup complete ==="
+  kubectl get nodes
+SHELL
+
+INSTALL_APPS_SCRIPT = <<~SHELL
+  set -e
+
+  export KUBECONFIG=/etc/kubernetes/admin.conf
+
+  echo "=== Waiting for all nodes to be Ready ==="
+  kubectl wait --for=condition=Ready nodes --all --timeout=300s
+
   echo "=== Downloading Istio to /opt/istio ==="
   mkdir -p /opt/istio
   cd /opt/istio
-  curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.21.0 sh -
+  if [ ! -d "/opt/istio/istio-1.21.0" ]; then
+    curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.21.0 sh -
+  fi
   ISTIO_DIR=$(ls -d /opt/istio/istio-*/ | head -1)
 
   echo "=== Installing istioctl to system PATH ==="
@@ -113,30 +133,107 @@ NETPLAN
   kubectl apply -f \
     https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 
+  echo "=== Installing Helm ==="
+  if ! command -v helm &> /dev/null; then
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  fi
+
   echo "=== Installing Istio ambient profile ==="
   istioctl install --set profile=ambient -y
 
   echo "=== Waiting for istiod to be Ready ==="
   kubectl wait --for=condition=Ready pods -l app=istiod \
-    -n istio-system --timeout=180s
+    -n istio-system --timeout=300s
 
   echo "=== Waiting for ztunnel to be Ready ==="
   kubectl rollout status daemonset/ztunnel \
-    -n istio-system --timeout=180s
+    -n istio-system --timeout=300s
 
   echo "=== Enabling ambient mode on default namespace ==="
-  kubectl label namespace default istio.io/dataplane-mode=ambient
+  kubectl label namespace default istio.io/dataplane-mode=ambient --overwrite
 
   echo "=== Deploying waypoint proxy ==="
   istioctl waypoint apply --namespace default
 
-  echo "=== Saving worker join command ==="
-  kubeadm token create --print-join-command > /vagrant/join-command.sh
-  chmod +x /vagrant/join-command.sh
+  echo "=== Deploying Istio Gateway ==="
+  kubectl apply -f - <<'GATEWAY'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: istio-gateway
+  namespace: default
+spec:
+  gatewayClassName: istio
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: All
+GATEWAY
 
-  echo "=== Master setup complete ==="
+  echo "=== Waiting for Gateway to be Ready ==="
+  kubectl wait --for=condition=Programmed gateway/istio-gateway \
+    -n default --timeout=180s || true
+
+  echo "=== Installing Harbor registry ==="
+  helm repo add harbor https://helm.goharbor.io
+  helm repo update
+
+  echo "=== Creating harbor namespace ==="
+  kubectl create namespace harbor || true
+
+  echo "=== Installing Harbor with ClusterIP ==="
+  helm install harbor harbor/harbor \
+    --namespace harbor \
+    --set expose.type=clusterIP \
+    --set expose.tls.enabled=false \
+    --set expose.clusterIP.name=harbor \
+    --set externalURL=http://192.168.56.10/harbor \
+    --set harborAdminPassword=Harbor12345 \
+    --set persistence.enabled=false
+
+  echo "=== Waiting for Harbor to be Ready ==="
+  kubectl wait --for=condition=Ready pods -l component=core \
+    -n harbor --timeout=300s || true
+
+  echo "=== Creating HTTPRoute for Harbor via Gateway at /harbor path ==="
+  kubectl apply -f - <<'HTTPROUTE'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: harbor-route
+  namespace: harbor
+spec:
+  parentRefs:
+  - name: istio-gateway
+    namespace: default
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /harbor
+    filters:
+    - type: URLRewrite
+      urlRewrite:
+        path:
+          type: ReplacePrefixMatch
+          replacePrefixMatch: /
+    backendRefs:
+    - name: harbor
+      port: 80
+HTTPROUTE
+
+  echo "=== Harbor Access Info ==="
+  echo "Harbor UI: http://192.168.56.10/harbor"
+  echo "Username: admin"
+  echo "Password: Harbor12345"
+
+  echo "=== Installation complete ==="
   kubectl get nodes
   kubectl get pods -n istio-system
+  kubectl get pods -n harbor
 SHELL
 
 WORKER_SCRIPT = <<~SHELL
