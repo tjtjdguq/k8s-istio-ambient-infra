@@ -1,4 +1,4 @@
-# ENV['VAGRANT_NO_PARALLEL'] = 'yes'   # ← forces master first, then worker
+ENV['VAGRANT_NO_PARALLEL'] = 'yes'   # ← forces master first, then worker
 
 MASTER_IP = "192.168.56.10"
 WORKER_IP = "192.168.56.11"
@@ -93,6 +93,17 @@ NETPLAN
   kubectl apply -f \
     https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
 
+  echo "=== Waiting for Calico pods to appear ==="
+  for i in $(seq 1 36); do
+    COUNT=$(kubectl get pods -l k8s-app=calico-node -n kube-system --no-headers 2>/dev/null | wc -l)
+    if [ "$COUNT" -gt "0" ]; then
+      echo "Calico pods found"
+      break
+    fi
+    echo "Waiting for Calico pods... attempt $i/36"
+    sleep 5
+  done
+
   echo "=== Waiting for Calico to be Ready ==="
   kubectl wait --for=condition=Ready pods -l k8s-app=calico-node \
     -n kube-system --timeout=180s
@@ -117,11 +128,10 @@ INSTALL_APPS_SCRIPT = <<~SHELL
   kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
   echo "=== Downloading Istio to /opt/istio ==="
+  rm -rf /opt/istio
   mkdir -p /opt/istio
   cd /opt/istio
-  if [ ! -d "/opt/istio/istio-1.21.0" ]; then
-    curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.21.0 sh -
-  fi
+  curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.29.1 sh -
   ISTIO_DIR=$(ls -d /opt/istio/istio-*/ | head -1)
 
   echo "=== Installing istioctl to system PATH ==="
@@ -278,14 +288,14 @@ NETPLAN
 SHELL
 
 Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/jammy64"
+  config.vm.box = "bento/ubuntu-22.04"
 
   config.vm.define "master" do |master|
     master.vm.hostname = "k8s-master"
     master.vm.network "private_network", ip: MASTER_IP
     master.vm.provider "virtualbox" do |vb|
       vb.name   = "k8s-master"
-      vb.memory = "4096"
+      vb.memory = "8192"
       vb.cpus   = 2
     end
     master.vm.provision "shell", inline: COMMON_SCRIPT
@@ -297,7 +307,7 @@ Vagrant.configure("2") do |config|
     worker.vm.network "private_network", ip: WORKER_IP
     worker.vm.provider "virtualbox" do |vb|
       vb.name   = "k8s-worker"
-      vb.memory = "4096"
+      vb.memory = "8192"
       vb.cpus   = 2
     end
     worker.vm.provision "shell", inline: COMMON_SCRIPT

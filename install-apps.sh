@@ -9,9 +9,7 @@ kubectl wait --for=condition=Ready nodes --all --timeout=300s
 echo "=== Downloading Istio to /opt/istio ==="
 mkdir -p /opt/istio
 cd /opt/istio
-if [ ! -d "/opt/istio/istio-1.21.0" ]; then
-  curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.21.0 sh -
-fi
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.29.1 sh -
 ISTIO_DIR=$(ls -d /opt/istio/istio-*/ | head -1)
 
 echo "=== Installing istioctl to system PATH ==="
