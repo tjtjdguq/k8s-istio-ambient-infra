@@ -7,6 +7,7 @@ echo "=== Waiting for all nodes to be Ready ==="
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
 echo "=== Downloading Istio to /opt/istio ==="
+rm -rf /opt/istio
 mkdir -p /opt/istio
 cd /opt/istio
 curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.29.1 sh -
@@ -16,6 +17,33 @@ echo "=== Installing istioctl to system PATH ==="
 cp ${ISTIO_DIR}bin/istioctl /usr/local/bin/
 chmod +x /usr/local/bin/istioctl
 istioctl version --remote=false
+
+echo "=== Installing MetalLB ==="
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml
+
+echo "=== Waiting for MetalLB to be Ready ==="
+kubectl wait --for=condition=Ready pods -l app=metallb -n metallb-system --timeout=180s
+
+echo "=== Configuring MetalLB IP pool ==="
+kubectl apply -f - <<'METALLB'
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.56.200-192.168.56.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - default-pool
+METALLB
 
 echo "=== Installing Gateway API CRDs ==="
 kubectl apply -f \

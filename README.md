@@ -23,7 +23,7 @@ This will:
 \### 2. Install Istio, Helm, and Harbor (after cluster is ready)
 
 ```bash
-vagrant ssh master -c "sudo bash /vagrant/install-apps.sh"
+vagrant provision master --provision-with install-apps
 ```
 
 This will:
@@ -61,7 +61,45 @@ Login from your host machine:
 docker login 192.168.56.10/harbor
 ```
 
-\## Manual Installation (Alternative)
+\## Cluster Lifecycle (Shutdown & Resume)
+
+### Suspend / Resume (recommended)
+
+Saves the exact VM memory state. The cluster comes back as-is with no restart required.
+
+```bash
+vagrant suspend   # before shutting down your machine
+vagrant resume    # after powering back on
+```
+
+### Halt / Up
+
+Clean shutdown. All k8s control plane components (kubelet, etcd, apiserver) are registered as systemd services and will auto-start on `vagrant up`.
+
+```bash
+vagrant halt      # before shutting down your machine
+vagrant up        # after powering back on
+```
+
+Wait ~60s after `vagrant up` for the cluster to fully initialize, then verify:
+
+```bash
+kubectl get nodes
+kubectl get pods -n istio-system
+```
+
+> **Note:** `vagrant suspend` is safer than `vagrant halt` — if etcd doesn't start cleanly after a halt, the cluster can get stuck.
+
+### Snapshot (save a known-good state)
+
+Take a snapshot once the cluster and Istio ambient mode are fully configured:
+
+```bash
+vagrant snapshot save "cluster-ready"      # save baseline
+vagrant snapshot restore "cluster-ready"   # roll back if needed
+```
+
+## Manual Installation (Alternative)
 
 If you prefer to run the apps installation from within the master node:
 
