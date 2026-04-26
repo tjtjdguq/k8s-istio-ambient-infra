@@ -136,6 +136,90 @@ helm repo update
 echo "=== Creating harbor namespace ==="
 kubectl create namespace harbor || true
 
+echo "=== Setting up Harbor persistent storage under shared folder ==="
+mkdir -p /vagrant/harbor/{registry,database,redis,jobservice,trivy}
+chmod -R 777 /vagrant/harbor
+
+kubectl apply -f - <<'HARBOR_STORAGE'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: harbor-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: Immediate
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: harbor-registry-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: harbor-local
+  hostPath:
+    path: /vagrant/harbor/registry
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: harbor-database-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: harbor-local
+  hostPath:
+    path: /vagrant/harbor/database
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: harbor-redis-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: harbor-local
+  hostPath:
+    path: /vagrant/harbor/redis
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: harbor-jobservice-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: harbor-local
+  hostPath:
+    path: /vagrant/harbor/jobservice
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: harbor-trivy-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: harbor-local
+  hostPath:
+    path: /vagrant/harbor/trivy
+    type: DirectoryOrCreate
+HARBOR_STORAGE
+
 echo "=== Installing Harbor with ClusterIP ==="
 helm upgrade --install harbor harbor/harbor \
   --namespace harbor \
@@ -144,7 +228,17 @@ helm upgrade --install harbor harbor/harbor \
   --set expose.clusterIP.name=harbor \
   --set externalURL=http://${ADMIN_GW_IP} \
   --set harborAdminPassword=Harbor12345 \
-  --set persistence.enabled=false
+  --set persistence.enabled=true \
+  --set persistence.persistentVolumeClaim.registry.storageClass=harbor-local \
+  --set persistence.persistentVolumeClaim.registry.size=5Gi \
+  --set persistence.persistentVolumeClaim.database.storageClass=harbor-local \
+  --set persistence.persistentVolumeClaim.database.size=1Gi \
+  --set persistence.persistentVolumeClaim.redis.storageClass=harbor-local \
+  --set persistence.persistentVolumeClaim.redis.size=1Gi \
+  --set "persistence.persistentVolumeClaim.jobservice.jobLog.storageClass=harbor-local" \
+  --set "persistence.persistentVolumeClaim.jobservice.jobLog.size=1Gi" \
+  --set persistence.persistentVolumeClaim.trivy.storageClass=harbor-local \
+  --set persistence.persistentVolumeClaim.trivy.size=5Gi
 
 echo "=== Waiting for Harbor to be Ready ==="
 kubectl wait --for=condition=Ready pods -l component=core \
@@ -175,6 +269,38 @@ echo "=== Harbor Access Info ==="
 echo "Harbor UI: http://${ADMIN_GW_IP}"
 echo "Username: admin"
 echo "Password: Harbor12345"
+
+echo "=== Installing GitHub Actions Runner Controller ==="
+if [ -z "${GITHUB_TOKEN}" ]; then
+  echo "SKIP: GITHUB_TOKEN not set. To install ARC, re-run with:"
+  echo "  GITHUB_TOKEN=<your-pat> sudo -E bash /vagrant/install-apps.sh"
+else
+  helm upgrade --install arc \
+    --namespace arc-systems \
+    --create-namespace \
+    oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+
+  echo "=== Waiting for ARC controller to be Ready ==="
+  kubectl wait --for=condition=Available \
+    deployment/arc-gha-runner-scale-set-controller \
+    -n arc-systems --timeout=180s
+
+  helm upgrade --install arc-runner-set \
+    --namespace arc-runners \
+    --create-namespace \
+    --set githubConfigUrl="https://github.com/tjtjdguq/project-store" \
+    --set githubConfigSecret.github_token="${GITHUB_TOKEN}" \
+    oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+
+  echo "=== Waiting for ARC runner set to be Ready ==="
+  kubectl wait --for=condition=Available \
+    deployment/arc-runner-set-gha-runner-scale-set \
+    -n arc-runners --timeout=180s || true
+
+  echo "=== ARC Runner Info ==="
+  kubectl get pods -n arc-systems
+  kubectl get pods -n arc-runners
+fi
 
 echo "=== Installation complete ==="
 kubectl get nodes

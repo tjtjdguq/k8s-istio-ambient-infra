@@ -20,11 +20,18 @@ This will:
 - Install Calico CNI
 - Join worker to the cluster
 
-\### 2. Install Istio, Helm, and Harbor (after cluster is ready)
+\### 2. Install Istio, Helm, Harbor, and ARC (after cluster is ready)
 
 ```bash
+# Without GitHub Actions Runner (ARC skipped)
 vagrant provision master --provision-with install-apps
+
+# With GitHub Actions Runner
+GITHUB_TOKEN=<your-pat> vagrant provision master --provision-with install-apps
 ```
+
+> **GitHub PAT requirements**: `repo` scope for private repositories.
+> Generate at: GitHub → Settings → Developer settings → Personal access tokens
 
 This will:
 - Wait for all nodes to be ready
