@@ -47,18 +47,25 @@ kubectl get pods -n istio-system
 kubectl get pods -n harbor
 ```
 
-\## Harbor Registry
+\## Gateways
 
-Harbor is deployed and accessible via Istio Gateway:
+| Gateway | IP | Purpose |
+|---|---|---|
+| `istio-gateway` | 192.168.56.200 | General service traffic |
+| `admin-gateway` | 192.168.56.201 | Operator tools (Harbor, etc.) |
 
-- **URL**: http://192.168.56.10/harbor
+## Harbor Registry
+
+Harbor is deployed and accessible via the admin gateway:
+
+- **URL**: http://192.168.56.201
 - **Username**: admin
 - **Password**: Harbor12345
 
 Login from your host machine:
 
 ```bash
-docker login 192.168.56.10/harbor
+docker login 192.168.56.201
 ```
 
 \## Cluster Lifecycle (Shutdown & Resume)
